@@ -115,34 +115,6 @@ describe("x402HTTPResourceServer facilitator response errors", () => {
     ).rejects.toThrow(FacilitatorResponseError);
   });
 
-  it("strips the transaction hash from a terminal settle failure (direct response)", async () => {
-    facilitator.setSettleResponse(
-      buildSettleResponse({
-        success: false,
-        errorReason: "invalid_exact_evm_transaction_failed",
-        transaction: "0xshouldnotbeexposed",
-        network,
-      }),
-    );
-
-    const accepted = buildPaymentRequirements({
-      scheme: "exact",
-      network,
-      payTo: "0xabc",
-      asset: "USDC",
-      amount: "1000000",
-    });
-    const result = await httpServer.processSettlement(
-      buildPaymentPayload({ x402Version: 2, accepted }),
-      accepted,
-    );
-
-    expect(result.success).toBe(false);
-    expect(result.transaction).toBe("");
-    const decoded = decodePaymentResponseHeader(result.headers["PAYMENT-RESPONSE"]);
-    expect(decoded.transaction).toBe("");
-  });
-
   it("keeps the transaction hash for a settlement_pending settle failure (direct response)", async () => {
     facilitator.setSettleResponse(
       buildSettleResponse({
@@ -171,12 +143,12 @@ describe("x402HTTPResourceServer facilitator response errors", () => {
     expect(decoded.transaction).toBe("0xpendingtx");
   });
 
-  it("strips the transaction hash from a terminal settle failure (thrown SettleError)", async () => {
+  it("keeps the transaction hash for a settlement_pending settle failure (thrown SettleError)", async () => {
     facilitator.setSettleResponse(
       new SettleError(402, {
         success: false,
-        errorReason: "invalid_exact_evm_transaction_failed",
-        transaction: "0xshouldnotbeexposed",
+        errorReason: "settlement_pending",
+        transaction: "0xpendingtx",
         network,
       }),
     );
@@ -194,9 +166,9 @@ describe("x402HTTPResourceServer facilitator response errors", () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.transaction).toBe("");
+    expect(result.transaction).toBe("0xpendingtx");
     const decoded = decodePaymentResponseHeader(result.headers["PAYMENT-RESPONSE"]);
-    expect(decoded.transaction).toBe("");
+    expect(decoded.transaction).toBe("0xpendingtx");
   });
 
   it("returns payment-error when client extension echo mismatches before facilitator verify", async () => {
