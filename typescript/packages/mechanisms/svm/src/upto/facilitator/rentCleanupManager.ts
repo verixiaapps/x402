@@ -479,7 +479,10 @@ export class UptoSvmRentCleanupManager {
             await this.storage.delete(candidate.channelId);
           }
         } catch (error) {
-          opts.onError?.(error, { channelId: batch[0]?.channelId });
+          // Every channel in the batch is stuck, not just the first.
+          for (const candidate of batch) {
+            opts.onError?.(error, { channelId: candidate.channelId });
+          }
         }
       }
     }
