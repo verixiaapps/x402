@@ -18,8 +18,14 @@ import { encodeVoucherMessageBytes, verifyVoucherSignature } from "../../payment
 import { SettlementCache } from "../../settlement-cache";
 import type { FacilitatorSigningCapabilities, FacilitatorSvmSigner } from "../../signer";
 import { isUptoSvmPayload, type UptoSvmPayloadV2 } from "../../types";
-import { createRpcClient, getStablecoinTokenProgram } from "../../utils";
-import { resolveUptoSvmPaymentChannelConfig, type UptoSvmPaymentChannelConfig } from "../shared";
+import { createRpcClient, validateSvmAddress } from "../../utils";
+import {
+  resolveTokenProgram,
+  resolveUptoSvmMemo,
+  resolveUptoSvmPaymentChannelConfig,
+  SLOT_COMMITMENT,
+  type UptoSvmPaymentChannelConfig,
+} from "../shared";
 import {
   broadcastOpen,
   channelExists,
@@ -554,9 +560,12 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       return this.settleFailure(payload, "invalid_upto_svm_payload_voucher_signature", p.from);
     }
 
-    const tokenProgram =
-      (requirements.extra?.tokenProgram as string | undefined) ??
-      getStablecoinTokenProgram(requirements.asset, requirements.network);
+    let tokenProgram: string;
+    try {
+      tokenProgram = resolveTokenProgram(requirements);
+    } catch {
+      return this.settleFailure(payload, "invalid_upto_svm_payment_requirements", p.from);
+    }
     const network = requirements.network;
     const rpc = createRpcClient(network, this.config.rpcUrl);
 
@@ -759,7 +768,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
           "requirements.extra.recentSlot",
         );
       } else {
-        recentSlot = await rpc.getSlot().send();
+        recentSlot = await rpc.getSlot({ commitment: SLOT_COMMITMENT }).send();
       }
     } catch {
       return {
@@ -832,9 +841,60 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
       };
     }
 
-    const tokenProgram =
-      (requirements.extra?.tokenProgram as string | undefined) ??
-      getStablecoinTokenProgram(requirements.asset, requirements.network);
+    // Reject unusable addresses here rather than letting them fail as an opaque
+    // open-transaction mismatch, so the payer learns which field is wrong.
+    if (!validateSvmAddress(p.from)) {
+      return {
+        ok: false,
+        failure: {
+          reason: "invalid_upto_svm_payload_payer_mismatch",
+          message: `payload.from ${p.from} is not a valid address`,
+          payer: p.from,
+        },
+      };
+    }
+    if (!validateSvmAddress(requirements.asset)) {
+      return {
+        ok: false,
+        failure: {
+          reason: "invalid_upto_svm_payment_requirements",
+          message: `requirements.asset ${requirements.asset} is not a valid mint address`,
+          payer: p.from,
+        },
+      };
+    }
+    // Checked after the fee-payer and receiver-authorizer identity comparisons
+    // above: a mismatch is the more specific answer, and a malformed value only
+    // matters once it is the value this facilitator would have signed against.
+    for (const [field, value] of [
+      ["feePayer", feePayer],
+      ["receiverAuthorizer", receiverAuthorizer],
+    ] as const) {
+      if (!validateSvmAddress(value)) {
+        return {
+          ok: false,
+          failure: {
+            reason: "invalid_upto_svm_payment_requirements",
+            message: `extra.${field} ${value} is not a valid address`,
+            payer: p.from,
+          },
+        };
+      }
+    }
+
+    let tokenProgram: string;
+    try {
+      tokenProgram = resolveTokenProgram(requirements);
+    } catch (error) {
+      return {
+        ok: false,
+        failure: {
+          reason: "invalid_upto_svm_payment_requirements",
+          message: error instanceof Error ? error.message : String(error),
+          payer: p.from,
+        },
+      };
+    }
 
     try {
       const open = await verifyOpenTransaction(p.openTransaction, {
@@ -845,7 +905,7 @@ export class UptoSvmScheme implements SchemeNetworkFacilitator {
         maxComputeUnits: this.config.maxComputeUnits,
         maxPriorityFeeMicroLamports: this.config.maxPriorityFeeMicroLamports,
         maxRequiredSignatures: this.config.maxRequiredSignatures,
-        memo: requirements.extra?.memo as string | undefined,
+        memo: resolveUptoSvmMemo(requirements.extra),
         mint: requirements.asset,
         openSlot,
         payee: feePayer,
